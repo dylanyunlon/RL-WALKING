@@ -1,0 +1,7 @@
+model_name_or_path: '/workspace/ww/pretrained_models/Qwen25-7B-Instruct'
+# adapter_name_or_path: '/workspace/ww/output/card/dou-leduc-limit'
+adapter_name_or_path: '/workspace/ww/output/card_qwen/doudizhu3-500000'
+template: qwen
+finetuning_type: lora
+
+# do_sample: false

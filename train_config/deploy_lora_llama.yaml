@@ -1,0 +1,7 @@
+model_name_or_path: '/workspace/ww/pretrained_models/Meta-Llama-3_1-8B-Instruct'
+# adapter_name_or_path: '/workspace/ww/output/card/dou-leduc-limit'
+adapter_name_or_path: '/workspace/ww/output/card/doudizhu3-500000'
+template: llama3
+finetuning_type: lora
+
+# do_sample: false

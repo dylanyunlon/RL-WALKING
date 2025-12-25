@@ -1,0 +1,53 @@
+### model
+# hub_token: &base_dir /workspace/ww
+# dataset_dir: '/workspace/ww/project/card_agent/LLaMA-Factory/data'
+dataset_dir: '/workspace/ww/project/card_agent/llm4cardgame/data'
+model_name_or_path: '/workspace/ww/pretrained_models/glm-4-9b-chat'
+adapter_name_or_path: '/workspace/ww/output/card/uno-d3-500k-100000'
+
+### method
+stage: sft
+do_train: true
+# finetuning_type: full
+finetuning_type: lora
+lora_target: all
+
+### dataset
+# dataset: doudizhu,leduc,limit
+dataset: doudizhu2,guandan2
+template: glm4
+cutoff_len: 4096
+max_samples: 10000
+overwrite_cache: true
+preprocessing_num_workers: 16
+
+### output
+# output_dir: '/workspace/ww/output/card/dou-leduc-limit'
+output_dir: '/workspace/ww/output/card/dou2-guan2'
+logging_steps: 10
+# save_strategy: epoch
+save_strategy: steps
+save_only_model: true
+save_steps: 50
+plot_loss: true
+overwrite_output_dir: true
+report_to: wandb
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-4
+# num_train_epochs: 3.0
+num_train_epochs: 1
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+# warmup_ratio: 0.05
+bf16: true
+ddp_timeout: 180000000
+
+### eval
+val_size: 1000
+per_device_eval_batch_size: 2
+# eval_strategy: epoch
+eval_strategy: steps
+eval_steps: 50

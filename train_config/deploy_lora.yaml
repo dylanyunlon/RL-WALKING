@@ -1,0 +1,7 @@
+model_name_or_path: '/workspace/ww/pretrained_models/glm-4-9b-chat'
+# adapter_name_or_path: '/workspace/ww/output/card/dou-leduc-limit'
+adapter_name_or_path: '/workspace/ww/output/card/doudizhu3-500000'
+template: glm4
+finetuning_type: lora
+
+# do_sample: false

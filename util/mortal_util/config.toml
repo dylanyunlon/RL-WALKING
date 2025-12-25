@@ -1,0 +1,30 @@
+# This is only an example. Most values are dummy placeholders just to match the
+# types; they are often not optimal and must be tuned.
+
+[control]
+version = 4
+online = false
+
+[1v3]
+seed_key = -1
+games_per_iter = 100
+iters = 1
+log_dir = '/workspace/ww/project/card_agent/llm4cardgame/util/mahjong_util/mortal_bot'
+
+[1v3.challenger]
+device = 'cuda:0'
+name = 'mortal'
+state_file = '/workspace/ww/project/card_agent/llm4cardgame/util/mahjong_util/mortal_bot/mortal.pth'
+stochastic_latent = false
+enable_compile = false
+enable_amp = true
+enable_rule_based_agari_guard = true
+
+[1v3.champion]
+device = 'cuda:0'
+name = 'baseline'
+state_file = '/workspace/ww/project/card_agent/llm4cardgame/util/mahjong_util/mortal_bot/mortal.pth'
+stochastic_latent = false
+enable_compile = false
+enable_amp = true
+enable_rule_based_agari_guard = true

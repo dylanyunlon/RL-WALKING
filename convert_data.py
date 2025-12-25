@@ -1,0 +1,645 @@
+"""
+Convert Game Data to SFT Format for LLM4CardGame
+=================================================
+
+This script supports TWO data formats:
+1. Original log format (log-*.txt): Python dict strings with 'obs' fields
+2. New trajectory format (trajectory-*.jsonl): JSON with 'trajectory' array
+
+Usage:
+    python convert_data.py --game dou_dizhu --input ./data_gen/xxx --output ./data/sft/xxx.jsonl
+"""
+
+import json
+import os
+import sys
+import argparse
+import ast
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from tqdm import tqdm
+
+# Import prompt templates
+try:
+    from prompt.prompt_dou_dizhu4 import prompt_dou_dizhu
+    from prompt.prompt_leduc_holdem import prompt_leduc_holdem
+    from prompt.prompt_limit_holdem import prompt_limit_holdem
+    from prompt.prompt_guandan4 import prompt_guandan
+    from prompt.prompt_mahjong_riichi4 import prompt_riichi
+    from prompt.prompt_nolimit_holdem import prompt_nolimit_holdem
+    from prompt.prompt_uno import prompt_uno
+    from prompt.prompt_gin_rummy import prompt_gin_rummy
+    PROMPTS_AVAILABLE = True
+except ImportError as e:
+    print(f"Warning: Could not import prompt templates: {e}")
+    print("Using fallback prompts for doudizhu")
+    PROMPTS_AVAILABLE = False
+    
+    # Fallback prompt for doudizhu
+    prompt_dou_dizhu = '''You are playing Doudizhu (斗地主).
+
+Turn: %s
+Your role: %s
+Your hand cards: %s
+Other players' hand cards (estimated): %s
+Last move: %s
+Played cards history: %s
+Number of cards left: %s
+Bomb count: %s
+Action history: %s
+Legal actions: %s
+
+What card(s) should you play? Output as JSON with 'action' key.'''
+
+
+# ===========================================
+# Utility Functions
+# ===========================================
+
+def read_jsonl_generator(path):
+    """Read JSONL file as generator."""
+    with open(path, 'r') as jsonl_file:
+        for line in jsonl_file:
+            line = line.strip()
+            if line:
+                yield json.loads(line)
+
+def read_jsonl(path):
+    """Read JSONL file as list."""
+    with open(path, 'r') as jsonl_file:
+        return [json.loads(line) for line in jsonl_file if line.strip()]
+
+def read_python_dict_lines(path):
+    """Read file with Python dict format (single quotes) and convert to JSON-like dicts."""
+    results = []
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                # Try JSON first
+                data = json.loads(line)
+                results.append(data)
+            except json.JSONDecodeError:
+                try:
+                    # Try Python literal eval (handles single quotes)
+                    data = ast.literal_eval(line)
+                    results.append(data)
+                except (ValueError, SyntaxError) as e:
+                    # Skip invalid lines
+                    continue
+    return results
+
+def detect_file_format(filepath):
+    """
+    Detect the format of the data file.
+    Returns: 'trajectory_jsonl', 'log_txt', or 'unknown'
+    """
+    filename = os.path.basename(filepath)
+    
+    if filename.startswith('trajectory') and filename.endswith('.jsonl'):
+        return 'trajectory_jsonl'
+    elif filename.startswith('log') and filename.endswith('.txt'):
+        return 'log_txt'
+    
+    # Try to detect by content
+    try:
+        with open(filepath, 'r') as f:
+            first_line = f.readline().strip()
+            if first_line.startswith('{"trajectory"'):
+                return 'trajectory_jsonl'
+            elif first_line.startswith('{') and "'landlord'" in first_line:
+                return 'log_txt'
+    except:
+        pass
+    
+    return 'unknown'
+
+
+# ===========================================
+# Original Format Converters (log-*.txt)
+# ===========================================
+
+def split_by_game_winner(all_data):
+    """Split data into per-game chunks based on 'winner' field."""
+    per_game = []
+    cur_game = []
+    for line in all_data:
+        cur_game.append(line)
+        if 'winner' in line:
+            per_game.append(cur_game)
+            cur_game = []
+    return per_game
+
+def convert_dou_dizhu_log(data_path):
+    """Convert original log format for doudizhu."""
+    all_data = read_python_dict_lines(data_path)
+    per_games = split_by_game_winner(all_data)
+
+    items = []
+    for game in per_games:
+        if len(game) < 2:
+            continue
+        meta_line = game[0]
+        winner = game[-1].get('winner', '')
+        game = game[1:-1]
+
+        for line in game:
+            if 'obs' not in line:
+                continue
+            # only model player (winner's team)
+            role = line['obs']['player_position']
+            if role == 'landlord_up' or role == 'landlord_down':
+                role_team = 'farmer'
+            else:
+                role_team = 'landlord'
+            if role_team != winner:
+                continue
+            
+            # skip if only one legal action
+            if len(line['obs'].get('legal_actions', [])) < 2:
+                continue
+            
+            item = prompt_dou_dizhu % (
+                json.dumps(line['obs'].get('turn_number', 0)),
+                json.dumps(role), 
+                json.dumps(line['obs'].get('player_hand_cards', [])), 
+                json.dumps(line['obs'].get('other_hand_cards', [])),
+                json.dumps(line['obs'].get('last_move', [])),
+                json.dumps(line['obs'].get('played_cards', {})),
+                json.dumps(line['obs'].get('num_cards_left', [])),
+                json.dumps(line['obs'].get('bomb_num', 0)),
+                json.dumps(line['obs'].get('history_action', [])),
+                json.dumps(line['obs'].get('legal_actions', [])),
+            )
+            sft_item = {
+                'instruction': item,
+                'output': json.dumps({'action': line.get('action', [])})
+            }
+            json_item = json.dumps(sft_item, ensure_ascii=False)
+            items.append(json_item)
+    return items
+
+
+# ===========================================
+# New Trajectory Format Converters (trajectory-*.jsonl)
+# ===========================================
+
+def convert_dou_dizhu_trajectory(data_path):
+    """Convert new trajectory format for doudizhu."""
+    items = []
+    
+    with open(data_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            
+            try:
+                game_data = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"Warning: Failed to parse line: {e}")
+                continue
+            
+            trajectory = game_data.get('trajectory', [])
+            winner = game_data.get('winner', '')
+            
+            for step in trajectory:
+                position = step.get('position', '')
+                hand_cards = step.get('hand_cards', [])
+                legal_actions = step.get('legal_actions', [])
+                action = step.get('action', [])
+                
+                # Skip if empty hand or legal actions
+                if not hand_cards or not legal_actions:
+                    continue
+                
+                # Skip if only one legal action
+                if len(legal_actions) < 2:
+                    continue
+                
+                # Filter by winner (only keep winner's actions)
+                if position == 'landlord':
+                    role_team = 'landlord'
+                else:
+                    role_team = 'farmer'
+                
+                if winner and role_team != winner:
+                    continue
+                
+                # Build the prompt using the same template format
+                item = prompt_dou_dizhu % (
+                    json.dumps(step.get('turn_number', 0) if 'turn_number' in step else 0),
+                    json.dumps(position),
+                    json.dumps(hand_cards),
+                    json.dumps(step.get('other_hand_cards', [])),
+                    json.dumps(step.get('last_move', [])),
+                    json.dumps(step.get('played_cards', {})),
+                    json.dumps(step.get('num_cards_left', {})),
+                    json.dumps(step.get('bomb_num', 0)),
+                    json.dumps(step.get('history_action', [])),
+                    json.dumps(legal_actions),
+                )
+                
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': action})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    
+    return items
+
+
+def convert_dou_dizhu(data_path):
+    """
+    Convert doudizhu data - auto-detects format.
+    """
+    file_format = detect_file_format(data_path)
+    
+    if file_format == 'trajectory_jsonl':
+        return convert_dou_dizhu_trajectory(data_path)
+    elif file_format == 'log_txt':
+        return convert_dou_dizhu_log(data_path)
+    else:
+        # Try both formats
+        try:
+            return convert_dou_dizhu_trajectory(data_path)
+        except:
+            try:
+                return convert_dou_dizhu_log(data_path)
+            except Exception as e:
+                print(f"Warning: Could not parse {data_path}: {e}")
+                return []
+
+
+# ===========================================
+# Other Game Converters (unchanged)
+# ===========================================
+
+def split_by_game_reward(all_data):
+    per_game = []
+    cur_game = []
+    for line in all_data:
+        cur_game.append(line)
+        if 'reward' in line:
+            per_game.append(cur_game)
+            cur_game = []
+    return per_game
+
+def convert_guandan(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    all_data = read_jsonl(data)
+    per_games = split_by_game_reward(all_data)
+
+    items = []
+    for game in per_games:
+        if len(game) < 2:
+            continue
+        if game[-1]['reward'] > 0:
+            for line in game[:-1]:
+                if 'obs' not in line:
+                    continue
+                if len(line['obs']['legal_actions']) < 2:
+                    continue
+                item = prompt_guandan % (
+                    json.dumps(line['obs']['my_pos']), 
+                    json.dumps(line['obs']['my_hands']), 
+                    json.dumps(line['obs']['remaining_hands']), 
+                    json.dumps(line['obs']['last_action']), 
+                    json.dumps(line['obs']['last_teammate_action']), 
+                    json.dumps(line['obs']['number_of_cards_left']),
+                    json.dumps(line['obs']['down_played_cards']),
+                    json.dumps(line['obs']['teammate_played_cards']),
+                    json.dumps(line['obs']['up_played_cards']),
+                    json.dumps(line['obs']['self_rank']),
+                    json.dumps(line['obs']['oppo_rank']),
+                    json.dumps(line['obs']['cur_rank']),
+                    json.dumps(line['obs']['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': line['action']})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+def convert_riichi(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    all_data = read_jsonl(data)
+    items = []
+    for line in all_data:
+        if line['obs']['rank'] > 0:
+            continue
+        if len(line['obs']['legal_actions']) < 2:
+            continue
+        item = prompt_riichi % (
+            json.dumps(line['obs']['player_id']),
+            json.dumps(line['obs']['bakaze']),
+            json.dumps(line['obs']['jikaze']),
+            json.dumps(line['obs']['kyoku']),
+            json.dumps(line['obs']['honba']),
+            json.dumps(line['obs']['kyotaku']),
+            json.dumps(line['obs']['oya']),
+            json.dumps(line['obs']['p_scores']), 
+            json.dumps(line['obs']['p_rank']), 
+            json.dumps(line['obs']['at_turn']), 
+            json.dumps(line['obs']['tiles_left']),
+            json.dumps(line['obs']['shanten']), 
+            json.dumps(line['obs']['my_hands']),
+            json.dumps(line['obs']['waits']), 
+            json.dumps(line['obs']['dora_indicators']), 
+            json.dumps(line['obs']['doras_owned']), 
+            json.dumps(line['obs']['akas_in_hand']), 
+            json.dumps(line['obs']['doras_seen']), 
+            json.dumps(line['obs']['akas_seen']), 
+            json.dumps(line['obs']['tiles_seen']), 
+            json.dumps(line['obs']['ankan_candidates']), 
+            json.dumps(line['obs']['kakan_candidates']), 
+            json.dumps(line['obs']['kawa_overview']), 
+            json.dumps(line['obs']['fuuro_overview']), 
+            json.dumps(line['obs']['ankan_overview']), 
+            json.dumps(line['obs']['last_tedashis']), 
+            json.dumps(line['obs']['riichi_sutehais']), 
+            json.dumps(line['obs']['last_drew_tile_self']), 
+            json.dumps(line['obs']['last_discarded_tile']), 
+            json.dumps(line['obs']['riichi_declared']), 
+            json.dumps(line['obs']['riichi_accepted']), 
+            json.dumps(line['obs']['can_w_riichi']), 
+            json.dumps(line['obs']['is_w_riichi']), 
+            json.dumps(line['obs']['at_furiten']), 
+            json.dumps(line['obs']['is_menzen']), 
+            json.dumps(line['obs']['legal_actions']),
+        )
+        sft_item = {
+            'instruction': item,
+            'output': json.dumps({'action': line['action']})
+        }
+        json_item = json.dumps(sft_item, ensure_ascii=False)
+        items.append(json_item)
+    return items
+
+def convert_leduc_holdem(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    items = []
+    for line in read_jsonl_generator(data):
+        if line and line[-1][-3] > 0:
+            for sub_line in line:
+                observation = sub_line[0]
+                if len(observation['legal_actions']) < 2:
+                    continue
+                item = prompt_leduc_holdem % (
+                    observation['current_round'],
+                    observation['current_player'],
+                    json.dumps(observation['hand']),
+                    json.dumps(observation['public_card']),
+                    json.dumps(observation['my_chips']),
+                    json.dumps(observation['all_chips']),
+                    json.dumps(observation['raise_nums']),
+                    json.dumps(sub_line[-1]),
+                    json.dumps(observation['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': sub_line[1]})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+def convert_limit_holdem(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    items = []
+    for line in read_jsonl_generator(data):
+        if line and line[-1][-3] > 0:
+            for sub_line in line:
+                observation = sub_line[0]
+                if len(observation['legal_actions']) < 2:
+                    continue
+                item = prompt_limit_holdem % (
+                    observation['current_round'],
+                    observation['current_player'],
+                    json.dumps(observation['hand']),
+                    json.dumps(observation['public_cards']),
+                    json.dumps(observation['my_chips']),
+                    json.dumps(observation['all_chips']),
+                    json.dumps(observation['raise_nums']),
+                    json.dumps(sub_line[-1]),
+                    json.dumps(observation['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': sub_line[1]})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+def convert_nolimit_holdem(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    items = []
+    for line in read_jsonl_generator(data):
+        if line and line[-1][-3] > 0:
+            for sub_line in line:
+                observation = sub_line[0]
+                if len(observation['legal_actions']) < 2:
+                    continue
+                item = prompt_nolimit_holdem % (
+                    observation['stage'],
+                    observation['current_player'],
+                    json.dumps(observation['hand']),
+                    json.dumps(observation['public_cards']),
+                    json.dumps(observation['my_chips']),
+                    json.dumps(observation['all_chips']),
+                    json.dumps(observation['pot']),
+                    json.dumps(observation['stakes']),
+                    json.dumps(sub_line[-1]),
+                    json.dumps(observation['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': sub_line[1]})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+def convert_uno(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    items = []
+    for line in read_jsonl_generator(data):
+        if line and line[-1][-3] > 0:
+            for sub_line in line:
+                observation = sub_line[0]
+                if len(observation['legal_actions']) < 2:
+                    continue
+                item = prompt_uno % (
+                    observation['step'],
+                    observation['current_player'],
+                    json.dumps(observation['hand']),
+                    json.dumps(observation['target']),
+                    json.dumps(observation['played_cards']),
+                    json.dumps(observation['num_cards']),
+                    json.dumps(sub_line[-1]),
+                    json.dumps(observation['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': sub_line[1]})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+def convert_gin_rummy(data):
+    if not PROMPTS_AVAILABLE:
+        return []
+    items = []
+    for line in read_jsonl_generator(data):
+        if line and line[-1][-3] > 0:
+            for sub_line in line:
+                observation = sub_line[0]
+                item = prompt_gin_rummy % (
+                    observation['step'],
+                    observation['player_id'],
+                    json.dumps(observation['hand']),
+                    json.dumps(observation['top_discard']),
+                    json.dumps(observation['dead_cards']),
+                    json.dumps(observation['opponent_known_cards']),
+                    json.dumps(observation['stock_pile_num']),
+                    json.dumps(sub_line[-1]),
+                    json.dumps(observation['legal_actions']),
+                )
+                sft_item = {
+                    'instruction': item,
+                    'output': json.dumps({'action': sub_line[1]})
+                }
+                json_item = json.dumps(sft_item, ensure_ascii=False)
+                items.append(json_item)
+    return items
+
+
+# ===========================================
+# Main Conversion Logic
+# ===========================================
+
+def convert_to_sft(data, game=None):
+    """Convert a single file to SFT format."""
+    if game is None:
+        game = 'dou_dizhu'
+    
+    if game == 'dou_dizhu':
+        return convert_dou_dizhu(data)
+    elif game == 'leduc_holdem':
+        return convert_leduc_holdem(data)
+    elif game == 'limit_holdem':
+        return convert_limit_holdem(data)
+    elif game == 'nolimit_holdem':
+        return convert_nolimit_holdem(data)
+    elif game == 'uno':
+        return convert_uno(data)
+    elif game == 'guandan':
+        return convert_guandan(data)
+    elif game == 'riichi':
+        return convert_riichi(data)
+    elif game == 'gin_rummy':
+        return convert_gin_rummy(data)
+    else:
+        print(f"Unknown game: {game}")
+        return []
+
+def write_sft(data, path):
+    """Write SFT data to file."""
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else '.', exist_ok=True)
+    with open(path, 'w', encoding='utf-8') as sft_file:
+        for item in data:
+            sft_file.write(item)
+            sft_file.write('\n')
+
+def convert_dir(data_dir, game):
+    """Convert all files in directory."""
+    all_files = []
+    for root, dirs, files in os.walk(data_dir):
+        for file in files:
+            # Skip non-data files
+            if file.endswith('.py') or file.endswith('.sh'):
+                continue
+            # Include trajectory files and log files
+            if file.startswith('trajectory') or file.startswith('log'):
+                all_files.append((file, os.path.join(root, file)))
+
+    # Sort files by file name
+    all_files.sort(key=lambda x: x[0])
+    print(f"Found {len(all_files)} data files")
+    
+    if not all_files:
+        print(f"No data files found in {data_dir}")
+        return []
+
+    all_data = []
+    
+    # Multi-process with progress bar
+    with ProcessPoolExecutor() as executor:
+        futures = [executor.submit(convert_to_sft, file[1], game) for file in all_files]
+        
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            try:
+                result = future.result()
+                all_data.extend(result)
+            except Exception as e:
+                print(f"Warning: Error processing file: {e}")
+                continue
+    
+    return all_data
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser("Convert data to SFT format")
+    parser.add_argument(
+        '--game',
+        type=str,
+        default='dou_dizhu',
+        help='Game type: dou_dizhu, guandan, riichi, uno, leduc_holdem, limit_holdem, nolimit_holdem, gin_rummy'
+    )
+    parser.add_argument(
+        '--input',
+        type=str,
+        default='',
+        help='Input file or directory'
+    )
+    parser.add_argument(
+        '--output',
+        type=str,
+        default='',
+        help='Output file path'
+    )
+    args = parser.parse_args()
+
+    if not args.input:
+        print("Error: --input is required")
+        sys.exit(1)
+    if not args.output:
+        print("Error: --output is required")
+        sys.exit(1)
+
+    # Convert
+    if os.path.isdir(args.input):
+        data = convert_dir(args.input, args.game)
+    elif os.path.isfile(args.input):
+        data = convert_to_sft(args.input, args.game)
+    else:
+        raise ValueError(f"Input path '{args.input}' is neither a directory nor a file.")
+
+    # Write output
+    write_sft(data, args.output)
+    
+    print(f"\nConversion complete!")
+    print(f"Total samples: {len(data)}")
+    print(f"Output: {args.output}")
