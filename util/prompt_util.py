@@ -209,16 +209,40 @@ def out_parse_function_nolimit_holdem(text):
     return out_parse_function(text)
 
 def prompt_function_uno(state):
+    """
+    为 UNO 游戏生成 prompt
+    RLCard UNO 的 raw_obs 实际包含:
+    - hand: 玩家手牌列表
+    - target: 当前弃牌堆顶牌
+    - played_cards: 已打出的牌
+    - legal_actions: 合法动作列表
+    - num_cards: 各玩家剩余牌数
+    - num_players: 玩家总数
+    - current_player: 当前玩家ID
+    """
     observation = state['raw_obs']
+    
+    # 使用 action_record 长度作为步数估计（因为 RLCard 不提供 step 字段）
+    current_step = len(state.get('action_record', []))
+    
+    # 从 raw_obs 获取实际存在的字段
+    current_player = observation.get('current_player', 0)
+    hand = observation.get('hand', [])
+    target = observation.get('target', '')
+    played_cards = observation.get('played_cards', [])
+    num_cards = observation.get('num_cards', [])
+    action_record = state.get('action_record', [])
+    legal_actions = observation.get('legal_actions', [])
+    
     item = prompt_uno % (
-                    observation['step'],
-                    observation['current_player'],
-                    json.dumps(observation['hand']),
-                    json.dumps(observation['target']),
-                    json.dumps(observation['played_cards']),
-                    json.dumps(observation['num_cards']),
-                    json.dumps(state['action_record']),
-                    json.dumps(observation['legal_actions']),
+                    current_step,
+                    current_player,
+                    json.dumps(hand),
+                    json.dumps(target),
+                    json.dumps(played_cards),
+                    json.dumps(num_cards),
+                    json.dumps(action_record),
+                    json.dumps(legal_actions),
                 )
     return item
 
@@ -226,17 +250,38 @@ def out_parse_function_uno(text):
     return out_parse_function(text)
 
 def prompt_function_gin_rummy(state):
+    """
+    为 Gin Rummy 游戏生成 prompt
+    需要检查 RLCard Gin Rummy 环境的实际数据结构
+    """
     observation = state['raw_obs']
+    
+    # 使用 action_record 长度作为步数估计
+    current_step = len(state.get('action_record', []))
+    
+    # Gin Rummy 可能的字段（需要根据实际环境调整）
+    player_id = observation.get('player_id', observation.get('current_player', 0))
+    hand = observation.get('hand', [])
+    
+    # Gin Rummy 特有字段，提供默认值以防不存在
+    top_discard = observation.get('top_discard', observation.get('discard_pile', [''])[0] if observation.get('discard_pile') else '')
+    dead_cards = observation.get('dead_cards', observation.get('known_cards', []))
+    opponent_known_cards = observation.get('opponent_known_cards', [])
+    stock_pile_num = observation.get('stock_pile_num', observation.get('stock_pile', 52))
+    
+    action_record = state.get('action_record', [])
+    legal_actions = observation.get('legal_actions', [])
+    
     item = prompt_gin_rummy % (
-                    observation['step'],
-                    observation['player_id'],
-                    json.dumps(observation['hand']),
-                    json.dumps(observation['top_discard']),
-                    json.dumps(observation['dead_cards']),
-                    json.dumps(observation['opponent_known_cards']),
-                    json.dumps(observation['stock_pile_num']),
-                    json.dumps(state['action_record']),
-                    json.dumps(observation['legal_actions']),
+                    current_step,
+                    player_id,
+                    json.dumps(hand),
+                    json.dumps(top_discard),
+                    json.dumps(dead_cards),
+                    json.dumps(opponent_known_cards),
+                    json.dumps(stock_pile_num),
+                    json.dumps(action_record),
+                    json.dumps(legal_actions),
                 )
     return item
 

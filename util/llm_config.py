@@ -29,8 +29,8 @@ model_provider = {
 }
 
 model_config = {
-    'llm': {
-        'name': 'llm',
+    'llm-lora': {
+        'name': 'llm-lora',
         'model_type': 'llm-lora',
         'do_sample': False,
         'call_func': model_provider['local'],

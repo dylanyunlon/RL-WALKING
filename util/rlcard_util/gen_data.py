@@ -121,6 +121,58 @@ def tournament(env, num):
     return payoffs, all_trajectories, all_rewards
 
 
+def _convert_action_to_str(action, env):
+    """
+    Convert action to string representation based on environment type.
+    
+    Args:
+        action: The action to convert (can be int, str, or other types)
+        env: The RLCard environment
+    
+    Returns:
+        str: String representation of the action
+    """
+    # Already a string, return as-is
+    if isinstance(action, str):
+        return action
+    
+    # MahjongCard type
+    if isinstance(action, MahjongCard):
+        return action.get_str()
+    
+    # Integer action ID - need to convert based on game type
+    if isinstance(action, int):
+        if env.name == 'uno':
+            from rlcard.games.uno.utils import ACTION_LIST
+            return ACTION_LIST[action]
+        elif env.name == 'gin-rummy':
+            from rlcard.games.gin_rummy.utils.action_event import ActionEvent
+            return ActionEvent.decode_action(action)
+        elif env.name == 'leduc-holdem':
+            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
+            return action_map.get(action, str(action))
+        elif env.name == 'limit-holdem':
+            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
+            return action_map.get(action, str(action))
+        elif env.name == 'no-limit-holdem':
+            # No-limit holdem has more complex action space
+            action_map = {0: 'fold', 1: 'check', 2: 'call', 3: 'raise'}
+            return action_map.get(action, str(action))
+        else:
+            # Fallback: try to use env's decode method if available
+            try:
+                return env._decode_action(action)
+            except:
+                return str(action)
+    
+    # For other types (like Action enum from nolimitholdem)
+    if isinstance(action, Action):
+        return action.name
+    
+    # Fallback to string conversion
+    return str(action)
+
+
 def reorganize(trajectories, payoffs, env=None):
     ''' Reorganize the trajectory to make it RL friendly
 
@@ -147,10 +199,10 @@ def reorganize(trajectories, payoffs, env=None):
             transition.append(done)
             transition.append(transition[0]['action_record'][-20:])
             transition[0] = transition[0]['raw_obs']
-            if not isinstance(transition[1], str) and not isinstance(transition[1], MahjongCard):
-                # print(player, transition[1])
-                transition[1] = env._convert_action_id_to_str(transition[1])
-                # transition[1] = int(transition[1])
+            
+            # Convert action to string using the helper function
+            transition[1] = _convert_action_to_str(transition[1], env)
+            
             if not isinstance(transition[2], float):
                 transition[2] = float(transition[2])
 
@@ -344,4 +396,3 @@ if __name__ == '__main__':
     evaluate_mp(args)
     end = time.time()
     print('Time in minutes:', (end - start) / 60)
-
