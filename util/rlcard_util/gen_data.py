@@ -44,6 +44,7 @@ def get_template(name):
 from rlcard.games.mahjong.card import MahjongCard
 from rlcard.games.nolimitholdem.round import Action
 from rlcard.games.nolimitholdem.game import Stage
+import numpy as np
 
 class RLCardEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -53,8 +54,20 @@ class RLCardEncoder(json.JSONEncoder):
             return obj.name
         if isinstance(obj, Stage):
             return obj.name
+        # Handle numpy types
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.integer, np.int64, np.int32)):
+            return int(obj)
+        if isinstance(obj, (np.floating, np.float64, np.float32)):
+            return float(obj)
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        # Handle Gin Rummy ActionEvent
+        if hasattr(obj, '__str__') and 'ActionEvent' in type(obj).__name__:
+            return str(obj)
         return super().default(obj)
-
+        
 pre_dict = {
     'leduc-holdem': '/workspace/ww/rl-card-results-1226/leduc-holdem/checkpoint_dqn.pt',
     'limit-holdem': '/workspace/ww/rl-card-results-1226/limit-holdem/checkpoint_dqn.pt',
@@ -126,51 +139,147 @@ def _convert_action_to_str(action, env):
     Convert action to string representation based on environment type.
     
     Args:
-        action: The action to convert (can be int, str, or other types)
+        action: The action to convert (can be int, str, numpy.int64, or other types)
         env: The RLCard environment
     
     Returns:
         str: String representation of the action
     """
-    # Already a string, return as-is
-    if isinstance(action, str):
-        return action
-    
     # MahjongCard type
     if isinstance(action, MahjongCard):
         return action.get_str()
-    
-    # Integer action ID - need to convert based on game type
-    if isinstance(action, int):
-        if env.name == 'uno':
-            from rlcard.games.uno.utils import ACTION_LIST
-            return ACTION_LIST[action]
-        elif env.name == 'gin-rummy':
-            from rlcard.games.gin_rummy.utils.action_event import ActionEvent
-            return ActionEvent.decode_action(action)
-        elif env.name == 'leduc-holdem':
-            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
-            return action_map.get(action, str(action))
-        elif env.name == 'limit-holdem':
-            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
-            return action_map.get(action, str(action))
-        elif env.name == 'no-limit-holdem':
-            # No-limit holdem has more complex action space
-            action_map = {0: 'fold', 1: 'check', 2: 'call', 3: 'raise'}
-            return action_map.get(action, str(action))
-        else:
-            # Fallback: try to use env's decode method if available
-            try:
-                return env._decode_action(action)
-            except:
-                return str(action)
     
     # For other types (like Action enum from nolimitholdem)
     if isinstance(action, Action):
         return action.name
     
+    # Convert string numbers to int for gin-rummy
+    # e.g., "2" -> 2 -> "draw_card"
+    action_int = None
+    if isinstance(action, str):
+        # Check if it's a numeric string that needs conversion
+        if action.isdigit():
+            action_int = int(action)
+        else:
+            # Already a proper action string (e.g., "r-9" for UNO, "call" for poker)
+            return action
+    elif isinstance(action, (int, np.integer)):  # Handle both Python int and numpy integers
+        action_int = int(action)
+    
+    # Convert integer action ID based on game type
+    if action_int is not None and env is not None:
+        if env.name == 'uno':
+            from rlcard.games.uno.utils import ACTION_LIST
+            if 0 <= action_int < len(ACTION_LIST):
+                return ACTION_LIST[action_int]
+        elif env.name == 'gin-rummy':
+            from rlcard.games.gin_rummy.utils.action_event import ActionEvent
+            try:
+                return str(ActionEvent.decode_action(action_int))
+            except:
+                pass
+        elif env.name == 'leduc-holdem':
+            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
+            if action_int in action_map:
+                return action_map[action_int]
+        elif env.name == 'limit-holdem':
+            action_map = {0: 'call', 1: 'raise', 2: 'fold', 3: 'check'}
+            if action_int in action_map:
+                return action_map[action_int]
+        elif env.name == 'no-limit-holdem':
+            action_map = {0: 'fold', 1: 'check', 2: 'call', 3: 'raise'}
+            if action_int in action_map:
+                return action_map[action_int]
+        else:
+            # Fallback: try to use env's decode method if available
+            try:
+                return env._decode_action(action_int)
+            except:
+                pass
+    
     # Fallback to string conversion
     return str(action)
+
+
+def _extract_gin_rummy_obs(state, env):
+    """
+    Extract readable observation from Gin Rummy state.
+    
+    Gin Rummy raw_obs is a (5, 52) numpy array:
+    - Row 0: Cards in hand (1 = has card)
+    - Row 1: Top discard card
+    - Row 2: Dead cards (discarded and known)
+    - Row 3: Opponent known cards
+    - Row 4: Unknown cards (in stock or opponent hand)
+    
+    Returns a dict with human-readable fields.
+    """
+    from rlcard.games.gin_rummy.utils.action_event import ActionEvent
+    
+    raw_obs = state.get('raw_obs', None)
+    raw_legal_actions = state.get('raw_legal_actions', [])
+    
+    # Card mapping: 52 cards, 4 suits x 13 ranks
+    # Index = suit * 13 + rank, where:
+    # - Suits: 0=Spades, 1=Hearts, 2=Diamonds, 3=Clubs
+    # - Ranks: 0=Ace, 1=2, ..., 12=King
+    suits = ['S', 'H', 'D', 'C']
+    ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+    
+    def indices_to_cards(row):
+        """Convert a binary row to list of card strings."""
+        cards = []
+        if isinstance(row, np.ndarray):
+            row = row.tolist()
+        for idx, val in enumerate(row):
+            if val == 1:
+                suit = suits[idx // 13]
+                rank = ranks[idx % 13]
+                cards.append(f"{rank}{suit}")
+        return cards
+    
+    def get_top_discard(row):
+        """Get the single top discard card."""
+        cards = indices_to_cards(row)
+        return cards[0] if cards else None
+    
+    # Extract info from numpy array
+    if isinstance(raw_obs, np.ndarray) and raw_obs.shape == (5, 52):
+        hand = indices_to_cards(raw_obs[0])
+        top_discard = get_top_discard(raw_obs[1])
+        dead_cards = indices_to_cards(raw_obs[2])
+        opponent_known_cards = indices_to_cards(raw_obs[3])
+        unknown_cards = indices_to_cards(raw_obs[4])
+        stock_pile_num = len(unknown_cards)
+    else:
+        # Fallback for unexpected format
+        hand = []
+        top_discard = None
+        dead_cards = []
+        opponent_known_cards = []
+        stock_pile_num = 0
+    
+    # Convert raw_legal_actions to readable format
+    legal_actions = []
+    for action in raw_legal_actions:
+        if isinstance(action, int):
+            try:
+                action_event = ActionEvent.decode_action(action)
+                legal_actions.append(str(action_event))
+            except:
+                legal_actions.append(str(action))
+        else:
+            legal_actions.append(str(action))
+    
+    return {
+        'hand': hand,
+        'top_discard': top_discard,
+        'dead_cards': dead_cards,
+        'opponent_known_cards': opponent_known_cards,
+        'stock_pile_num': stock_pile_num,
+        'legal_actions': legal_actions,
+        'player_id': 0,  # Will be set by caller if needed
+    }
 
 
 def reorganize(trajectories, payoffs, env=None):
@@ -189,16 +298,39 @@ def reorganize(trajectories, payoffs, env=None):
 
     for player in range(num_players):
         for i in range(0, len(trajectories[player])-2, 2):
-            if i ==len(trajectories[player])-3:
+            if i == len(trajectories[player])-3:
                 reward = payoffs[player]
-                done =True
+                done = True
             else:
                 reward, done = 0, False
             transition = trajectories[player][i:i+2].copy()
             transition.append(reward)
             transition.append(done)
-            transition.append(transition[0]['action_record'][-20:])
-            transition[0] = transition[0]['raw_obs']
+            
+            # Safe access to action_record (not all games have this field, e.g., gin-rummy)
+            action_record = transition[0].get('action_record', [])
+            transition.append(action_record[-20:] if action_record else [])
+            
+            # Handle different observation formats
+            raw_obs = transition[0].get('raw_obs', {})
+            
+            # Check if raw_obs is a numpy array (gin-rummy) or dict (most other games)
+            if isinstance(raw_obs, np.ndarray):
+                # For gin-rummy and similar games with array observations
+                if env is not None and env.name == 'gin-rummy':
+                    obs_dict = _extract_gin_rummy_obs(transition[0], env)
+                    obs_dict['player_id'] = player
+                    transition[0] = obs_dict
+                else:
+                    # Generic fallback for array observations
+                    transition[0] = {
+                        'obs_array': raw_obs.tolist() if isinstance(raw_obs, np.ndarray) else raw_obs,
+                        'legal_actions': transition[0].get('raw_legal_actions', []),
+                        'player_id': player,
+                    }
+            else:
+                # For games with dict observations (uno, leduc, etc.)
+                transition[0] = raw_obs
             
             # Convert action to string using the helper function
             transition[1] = _convert_action_to_str(transition[1], env)
